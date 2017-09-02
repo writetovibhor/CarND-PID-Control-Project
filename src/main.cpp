@@ -28,14 +28,64 @@ std::string hasData(std::string s) {
   return "";
 }
 
+// const double max_speed = 50;
+
 int main()
 {
   uWS::Hub h;
 
-  PID pid;
+  PID pid_steering;
+
+  // Twiddle not used for throttle
+  // PID pid_throttle;
+  
   // TODO: Initialize the pid variable.
 
-  h.onMessage([&pid](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
+  pid_steering.type = 0;
+  // pid_throttle.type = 1;
+
+  bool enable_twiddle = false;
+  bool enable_manual_config = false;
+
+  TW_BEST_PARAMS best_steering_params;
+  // TW_BEST_PARAMS best_throttle_params;
+
+  // Input to Twiddle
+  // best_steering_params.best_Kp = 0.1;
+  // best_steering_params.best_Ki = -0.0001;
+  // best_steering_params.best_Kd = 3.0;
+  // best_steering_params.best_dp[TW_PARAM_TYPE_P] = 0.01;
+  // best_steering_params.best_dp[TW_PARAM_TYPE_I] = 0.00001;
+  // best_steering_params.best_dp[TW_PARAM_TYPE_D] = 0.1;
+  // best_steering_params.tw_param_type = TW_PARAM_TYPE_D;
+  // best_steering_params.best_error = std::numeric_limits<double>::max();
+
+  // Result of Twiddle
+  best_steering_params.best_Kp = 0.30923;
+  best_steering_params.best_Ki = 0.000103916;
+  best_steering_params.best_Kd = 4.60079;
+  best_steering_params.best_dp[TW_PARAM_TYPE_P] = 0.0214359;
+  best_steering_params.best_dp[TW_PARAM_TYPE_I] = 1.75384e-05;
+  best_steering_params.best_dp[TW_PARAM_TYPE_D] = 0.214359;
+  best_steering_params.tw_param_type = TW_PARAM_TYPE_D;
+  best_steering_params.best_error = std::numeric_limits<double>::max();
+
+  // best_throttle_params.best_Kp = 0.0;
+  // best_throttle_params.best_Ki = 0.0;
+  // best_throttle_params.best_Kd = 0.0;
+  // best_throttle_params.best_dp[TW_PARAM_TYPE_P] = 1.0;
+  // best_throttle_params.best_dp[TW_PARAM_TYPE_I] = 1.0;
+  // best_throttle_params.best_dp[TW_PARAM_TYPE_D] = 1.0;
+  // best_throttle_params.tw_param_type = TW_PARAM_TYPE_P;
+  // best_throttle_params.best_error = std::numeric_limits<double>::max();
+
+  pid_steering.Init(best_steering_params, enable_twiddle);
+  // pid_throttle.Init(best_throttle_params, enable_twiddle);
+
+  double squared_error = 0.0;
+  int steps = 0;
+
+  h.onMessage([&pid_steering, &enable_twiddle, &best_steering_params, &enable_manual_config, &squared_error, &steps](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
@@ -50,23 +100,90 @@ int main()
           double cte = std::stod(j[1]["cte"].get<std::string>());
           double speed = std::stod(j[1]["speed"].get<std::string>());
           double angle = std::stod(j[1]["steering_angle"].get<std::string>());
-          double steer_value;
           /*
           * TODO: Calcuate steering value here, remember the steering value is
           * [-1, 1].
           * NOTE: Feel free to play around with the throttle and speed. Maybe use
           * another PID controller to control the speed!
           */
-          
-          // DEBUG
-          std::cout << "CTE: " << cte << " Steering Value: " << steer_value << std::endl;
+          // std::cout << "cte: " << cte << std::endl;
+          if (enable_manual_config) {
+            squared_error += std::pow(cte, 2);
+            steps++;
+            if (steps > 4000) {
+              std::string msg = "42[\"reset\",{}]";
+              ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+              ws.close();
+              return;
+            }
+            std::cout << steps << "\t" << std::sqrt(squared_error / steps) << std::endl;
+          }
 
-          json msgJson;
-          msgJson["steering_angle"] = steer_value;
-          msgJson["throttle"] = 0.3;
-          auto msg = "42[\"steer\"," + msgJson.dump() + "]";
-          std::cout << msg << std::endl;
-          ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+          pid_steering.UpdateError(cte);
+          double steer_value = pid_steering.TotalError();
+          if (steer_value < -1) {
+            steer_value = -1;
+          }
+          if (steer_value > 1) {
+            steer_value = 1;
+          }
+          // pid_throttle.UpdateError((max_speed - speed) * cte);
+          // double throttle_value = fabs(pid_throttle.TotalError());
+          double throttle_value = 0.2;
+          if (speed > 0.1) {
+            throttle_value = 0.1 + 0.6 * ((10 - fabs(angle)) / 10);
+          }
+          // if (throttle_value > max_speed / 100) {
+          //   throttle_value = max_speed / 100;
+          // }
+          // std::cout << "throttle: " << throttle_value << std::endl;
+          // DEBUG
+          // std::cout << "CTE: " << cte << " Steering Value: " << steer_value << std::endl;
+          if (enable_twiddle) {
+            // if ((pid_steering.tw_step_count < 10 * pid_steering.tw_total_steps) && (pid_throttle.tw_step_count < 10 * pid_throttle.tw_total_steps)) {
+            if (!(pid_steering.found_best || (pid_steering.tw_step_count > pid_steering.tw_total_steps * 10) || (pid_steering.tw_step_count > 1000 && speed < 0.1))) {
+              json msgJson;
+              msgJson["steering_angle"] = steer_value;
+              msgJson["throttle"] = throttle_value;
+              auto msg = "42[\"steer\"," + msgJson.dump() + "]";
+              // std::cout << msg << std::endl;
+              ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+            } else {
+              std::string msg = "42[\"reset\",{}]";
+              ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+              best_steering_params = pid_steering.best_params;
+              // best_throttle_params = pid_throttle.best_params;
+              if (!pid_steering.found_best) {
+                best_steering_params.tw_param_type = pid_steering.NextParamType();
+              }
+              // if (!pid_throttle.found_best) {
+              //   best_throttle_params.tw_param_type = pid_throttle.NextParamType();
+              // }
+              pid_steering.Init(best_steering_params, enable_twiddle);
+              // pid_throttle.Init(best_throttle_params, enable_twiddle);
+              std::cout << "reset steering " << " " << best_steering_params.best_Kp << ", " << 
+                                                best_steering_params.best_Ki << ", " << 
+                                                best_steering_params.best_Kd << ", " << 
+                                                best_steering_params.best_dp[TW_PARAM_TYPE_P] << ", " << 
+                                                best_steering_params.best_dp[TW_PARAM_TYPE_I] << ", " << 
+                                                best_steering_params.best_dp[TW_PARAM_TYPE_D] << ", " << 
+                                                ((best_steering_params.tw_param_type == TW_PARAM_TYPE_P)?"TW_PARAM_TYPE_P":((best_steering_params.tw_param_type == TW_PARAM_TYPE_I)?"TW_PARAM_TYPE_I":"TW_PARAM_TYPE_D")) << std::endl;
+              // std::cout << "reset throttle " << " " << best_throttle_params.best_Kp << ", " << 
+              //                                   best_throttle_params.best_Ki << ", " << 
+              //                                   best_throttle_params.best_Kd << ", " << 
+              //                                   best_throttle_params.best_dp[TW_PARAM_TYPE_P] << ", " << 
+              //                                   best_throttle_params.best_dp[TW_PARAM_TYPE_I] << ", " << 
+              //                                   best_throttle_params.best_dp[TW_PARAM_TYPE_D] << ", " << 
+              //                                   ((best_throttle_params.tw_param_type == TW_PARAM_TYPE_P)?"TW_PARAM_TYPE_P":((best_throttle_params.tw_param_type == TW_PARAM_TYPE_I)?"TW_PARAM_TYPE_I":"TW_PARAM_TYPE_D")) << std::endl;
+            }
+          } else {
+            json msgJson;
+            msgJson["steering_angle"] = steer_value;
+            msgJson["throttle"] = throttle_value;
+            auto msg = "42[\"steer\"," + msgJson.dump() + "]";
+            // std::cout << msg << std::endl;
+            ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+          }
         }
       } else {
         // Manual driving
